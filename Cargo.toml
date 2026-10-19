@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-buffe-rs = { git = "https://github.com/ecdhe-x25519/buffe-rs" }
+buffers = { git = "https://github.com/aeterna-ars/buffers" }
 
 [dev-dependencies]
 log = "0.4.33"

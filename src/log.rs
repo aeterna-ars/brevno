@@ -3,6 +3,8 @@ use core::{
     fmt::{self, Write},
 };
 
+use crate::buf::LogBuffer;
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -64,6 +66,16 @@ impl<const N: usize> Log<N> {
     }
 }
 
+impl<const N: usize> core::fmt::Display for Log<N> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        if let Ok(s) = self.decode() {
+            f.write_str(s)
+        } else {
+            f.write_str("[Invalid UTF-8 Log]")
+        }
+    }
+}
+
 struct LogWriter<'a, const N: usize> {
     log: &'a mut Log<N>,
 }
@@ -71,17 +83,16 @@ struct LogWriter<'a, const N: usize> {
 impl<'a, const N: usize> fmt::Write for LogWriter<'a, N> {
     #[inline(always)]
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let bytes = s.as_bytes();
         let remaining = N - self.log.len;
         
-        let to_copy = bytes.len().min(remaining);
+        let to_copy = s.len().min(remaining);
         if to_copy == 0 {
             return Ok(());
         }
 
         unsafe {
             ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
+                s.as_ptr(),
                 self.log.msg.as_mut_ptr().add(self.log.len),
                 to_copy,
             );
@@ -92,45 +103,15 @@ impl<'a, const N: usize> fmt::Write for LogWriter<'a, N> {
     }
 }
 
-pub trait LogBuffer<T> {
-    fn push(&self, item: T) -> Result<(), T>;
-    fn pop(&self) -> Option<T>;
-    fn is_full(&self) -> bool;
-}
-
-impl<const NL: usize> LogBuffer<Log<NL>> for buffers::SpscRingBuf<Log<NL>, 1024> {
-    fn push(&self, item: Log<NL>) -> Result<(), NL> {
-        self.push(item).map_err(|_| "Full")
-    }
-    fn pop(&self) -> Option<Log<NL>> { self.pop() }
-    fn is_full(&self) -> bool { self.is_full() }
-}
-
-impl<const NL: usize> LogBuffer<Log<NL>> for buffers::MpscRingBuf<Log<NL>, 1024> {
-    fn push(&self, item: Log<NL>) -> Result<(), T> {
-        self.push(item).map_err(|_| "Full")
-    }
-    fn pop(&self) -> Option<Log<NL>> { self.pop() }
-    fn is_full(&self) -> bool { self.is_full() }
-}
-
-impl<const NL: usize> LogBuffer<Log<NL>> for buffers::MpmcRingBuf<Log<NL>, 1024> {
-    fn push(&self, item: Log<NL>) -> Result<(), &'static str> {
-        self.push(item).map_err(|_| "Full")
-    }
-    fn pop(&self) -> Option<Log<NL>> { self.pop() }
-    fn is_full(&self) -> bool { self.is_full() }
-}
-
-pub struct Logger<B, const NL: usize> {
+pub struct Logger<B: LogBuffer> {
     buffer: B,
     level: LogLevel,
 }
 
-impl<const NB: usize, const NL: usize> Logger<NB, NL> {
-    pub const fn init(level: LogLevel) -> Self {
+impl<B: LogBuffer<Item = Log<NL>>, const NL: usize> Logger<B> {
+    pub const fn init(buf: B, level: LogLevel) -> Self {
         Self {
-            buffer: buffers::SpscRingBuf::new(),
+            buffer: buf,
             level,
         }
     }
@@ -146,56 +127,55 @@ impl<const NB: usize, const NL: usize> Logger<NB, NL> {
     }
 
     #[inline(always)]
-    pub fn push_raw(&self, log: Log<NL>) -> Result<(), &'static str> {
-        if self.buffer.is_full() {
-            return Err("Buffer is full");
-        }
-        let _ = self.buffer.push(log);
-        Ok(())
+    pub fn push_raw(&self, log: B::Item) -> Result<(), B::Item> {
+        self.buffer.push(log)
     }
 
     #[inline(always)]
-    pub fn write_log(&self, level: LogLevel, args: fmt::Arguments) -> Result<(), &'static str> {
+    pub fn pop(&self) -> Option<B::Item> {
+        self.buffer.pop()
+    }
+
+    #[inline(always)]
+    pub fn write_log(&self, level: LogLevel, args: fmt::Arguments) -> bool {
+        if level > self.level {
+            return false;
+        }
         if self.buffer.is_full() {
-            return Err("Buffer is full");
+            return false;
         }
 
-        let mut log = Log::new();
+        let mut log: Log<NL> = Log::new();
 
         let mut writer = LogWriter { log: &mut log };
         let _ = writer.write_str(level.as_str());
         let _ = fmt::write(&mut writer, args);
 
-        let _ = self.buffer.push(log);
-        Ok(())
-    }
-
-    #[inline(always)]
-    pub fn read_log(&self) -> Option<Log<NL>> { 
-        if self.buffer.is_empty() { 
-            return None; 
-        } 
-        self.buffer.pop() 
+        self.buffer.push(log).is_ok()
     }
 }
 
 #[cfg(test)]
 mod log_test {
-    use crate::init_global_logger;
+    extern crate std;
+
     use super::*;
+
+    use std::*;
 
     #[test]
     fn main_thread_formatting() {
-        crate::init_global_logger!(1024, 32, LogLevel::Info);
+        pub static GLOBAL_LOGGER: Logger<crate::buf::SpscRingBuf<Log<16>, 1024>> =
+            Logger::init(crate::buf::SpscRingBuf::new(), LogLevel::Info);
 
         let _ = crate::info!("Ferris");
         let _ = crate::warn!("the");
         let _ = crate::error!("crab");
 
         println!("\n");
-        println!("{}", GLOBAL_LOGGER.read_log().unwrap().decode().unwrap());
-        println!("{}", GLOBAL_LOGGER.read_log().unwrap().decode().unwrap());
-        println!("{}", GLOBAL_LOGGER.read_log().unwrap().decode().unwrap());
+        println!("{}", GLOBAL_LOGGER.pop().unwrap().decode().unwrap());
+        println!("{}", GLOBAL_LOGGER.pop().unwrap().decode().unwrap());
+        println!("{}", GLOBAL_LOGGER.pop().unwrap().decode().unwrap());
         println!("\n");
     }
 
@@ -203,42 +183,48 @@ mod log_test {
 
     #[test]
     fn threads_formatting() {
-        let logger: Arc<Logger<32, 32>> = Arc::new(Logger::init(LogLevel::Info));
+        let logger: Arc<Logger<crate::buf::MpscRingBuf<Log<16>, 1024>>> =
+            Arc::new(Logger::init(crate::buf::MpscRingBuf::new(), LogLevel::Info));
 
         let logger_1 = Arc::clone(&logger);
-        let thread_1 = std::thread::spawn(move || {
-            logger.write_log(LogLevel::Info, format_args!("1"))
+        let handle_1 = std::thread::spawn(move || {
+            logger_1.write_log(LogLevel::Info, format_args!("1"))
         });
 
         let logger_2 = Arc::clone(&logger);
-        let thread_2 = std::thread::spawn(move || {
-            logger.write_log(LogLevel::Info, format_args!("1"))
+        let handle_2 = std::thread::spawn(move || {
+            logger_2.write_log(LogLevel::Info, format_args!("1"))
         });
 
         let logger_3 = Arc::clone(&logger);
-        let thread_3 = std::thread::spawn(move || {
-            logger.write_log(LogLevel::Info, format_args!("1"))
+        let handle_3 = std::thread::spawn(move || {
+            logger_3.write_log(LogLevel::Info, format_args!("1"))
         });
 
+        handle_1.join().unwrap();
+        handle_2.join().unwrap();
+        handle_3.join().unwrap();
+
         println!("\n");
-        println!("{}", logger.read_log().unwrap().decode().unwrap());
-        println!("{}", logger.read_log().unwrap().decode().unwrap());
-        println!("{}", logger.read_log().unwrap().decode().unwrap());
+        println!("{}", logger.pop().unwrap().decode().unwrap());
+        println!("{}", logger.pop().unwrap().decode().unwrap());
+        println!("{}", logger.pop().unwrap().decode().unwrap());
         println!("\n");
     }
 
     #[test]
     fn function_formatting() {
-        let logger: Logger<1024, 32> = Logger::init(LogLevel::Info);
+        let logger: Logger<crate::buf::SpscRingBuf<Log<16>, 1024>> =
+            Logger::init(crate::buf::SpscRingBuf::new(), LogLevel::Info);
 
         let _ = logger.write_log(LogLevel::Info, format_args!("Ferris"));
         let _ = logger.write_log(LogLevel::Info, format_args!("the"));
         let _ = logger.write_log(LogLevel::Info, format_args!("crab"));
 
         println!("\n");
-        println!("{}", logger.read_log().unwrap().decode().unwrap());
-        println!("{}", logger.read_log().unwrap().decode().unwrap());
-        println!("{}", logger.read_log().unwrap().decode().unwrap());
+        println!("{}", logger.pop().unwrap().decode().unwrap());
+        println!("{}", logger.pop().unwrap().decode().unwrap());
+        println!("{}", logger.pop().unwrap().decode().unwrap());
         println!("\n");
     }
 
@@ -262,7 +248,8 @@ mod log_test {
 
     #[test]
     fn benchmark_vs_log() {
-        crate::init_global_logger!(1024, 32, LogLevel::Info);
+        pub static GLOBAL_LOGGER: Logger<crate::buf::SpscRingBuf<Log<16>, 1024>> =
+            Logger::init(crate::buf::SpscRingBuf::new(), LogLevel::Info);
 
         INIT_LOG.call_once(|| {
             log::set_logger(&LOGGER).unwrap();

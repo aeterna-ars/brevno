@@ -13,7 +13,7 @@ dependencies = [
 [[package]]
 name = "buffers"
 version = "0.1.0"
-source = "git+https://github.com/aeterna-ars/buffers#9337a45566ddab858930f287b8e27a11319d31ae"
+source = "git+https://github.com/aeterna-ars/buffers#c8ec5c4e29ebd07299523261696c17df4210c27b"
 
 [[package]]
 name = "log"

@@ -1,6 +1,5 @@
-#[cfg(test)]
-#[macro_use]
-extern crate std;
+#![no_std]
 
 pub mod log;
 pub mod macros;
+pub mod buf;

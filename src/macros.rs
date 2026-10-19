@@ -1,12 +1,4 @@
 #[macro_export]
-macro_rules! init_global_logger {
-    ($nb:expr, $nl:expr, $level:expr) => {
-        // NB - ring buffer size; NL - max log message length (bytes)
-        pub static GLOBAL_LOGGER: $crate::log::Logger<$nb, $nl> = $crate::log::Logger::init($level);
-    };
-}
-
-#[macro_export]
 macro_rules! error {
     ($msg:literal) => {
         if (GLOBAL_LOGGER.level() as u8) >= ($crate::log::LogLevel::Error as u8) {
